@@ -9,6 +9,12 @@
 
 ## Audit Status
 
+> **Update (2026-07-11):** The direct AccuLynx REST API was subsequently exercised **live, read-only** with
+> the NSR API key. See the companion **[`NSR_Phase1_AccuLynx_Discovery_Addendum.md`](./NSR_Phase1_AccuLynx_Discovery_Addendum.md)**
+> for the fully enumerated catalogs (8 job custom fields with IDs, 0 contact fields, **46 milestone
+> sub-statuses with IDs**, 16 users + roles, the 15-parent lead-source tree). Critical blockers #2 and #3
+> below are **RESOLVED** there.
+
 **Partially completed** — Discovery objectives met against the real NSR AccuLynx account, but two access
 surfaces exist and only one (the Zapier "AccuLynx CLI") could be *exercised live* in this environment.
 The direct AccuLynx REST API is fully **documented and code-verified** in NSR's own `AcculynxCommandCenter`
