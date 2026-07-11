@@ -37,11 +37,17 @@ There is **no local `acculynx` CLI binary**. "The AccuLynx CLI skill" resolves t
 | A | **Zapier "AccuLynx" integration** (`AccuLynxCLIAPI`, exposed through the Zapier MCP server) | 28 pre-built actions — 22 read, 6 write | Zapier-managed OAuth to AccuLynx | **Live** in this session |
 | B | **Direct AccuLynx REST API v2** (`https://api.acculynx.com/api/v2`) driven by NSR's `AcculynxCommandCenter` repo (`sync/acculynx_sync.py` + n8n workflow generators) | Full REST: jobs, financials, milestone-history, custom-fields, users, representatives, company-settings, webhooks/subscriptions | `Authorization: Bearer <ACCULYNX_API_KEY>` | **In repo** (author-verified 2026-06-10); key held in n8n credential `Acculynx API` |
 
-**Key takeaway:** The Zapier CLI is the safest, already-wired read surface for lead/job/contact/appointment
-data and change triggers, but it **cannot see financials, milestone history, or the full custom-field
-catalog**. Everything money- and cycle-time-related in Phase 1 requires **Surface B (direct REST)**, which
-NSR has already built and proven. n8n holds the `Acculynx API` header-auth credential (personal project,
-owner Mathew Kennington) and a `HighLevel PIT` credential for GoHighLevel.
+> **Go-forward decision (owner-directed):** NSR Intelligence automations run **entirely on n8n**. **Zapier
+> is NOT part of the go-forward architecture** — it was used in this audit only as a safe, read-only lens to
+> inspect the live account. Every capability attributed to "Surface A" below is documentation of what was
+> observed, **not** a recommended integration path. **The single go-forward path is Surface B: n8n HTTP
+> Request nodes → the direct AccuLynx REST API v2, authenticated by the existing n8n `Acculynx API`
+> header-auth credential** (personal project, owner Mathew Kennington). n8n also holds a `HighLevel PIT`
+> credential for GoHighLevel.
+
+**Key takeaway:** The direct REST API (driven from n8n) is the integration surface for Phase 1. The Zapier
+observations confirm the same objects/fields are reachable, but financials, milestone history, and the full
+custom-field catalog are **only** available on the direct API — so n8n must use the direct API regardless.
 
 ---
 
@@ -98,11 +104,10 @@ owner Mathew Kennington) and a `HighLevel PIT` credential for GoHighLevel.
 nodes** (n8n can't bind a generic Bearer credential via API) — workflows must stay in a private workspace and
 the key rotated if exposed. Zapier and direct-API both return **stable GUIDs**, enabling clean record-linking.
 
-**Is Phase 1 feasible?** **Yes, with a hybrid design.** Morning Brief, Exception Notifications, Weekly CEO
-Memo, and the Production-Readiness Gate are all supportable from AccuLynx structured data **provided the
-direct REST API (Surface B) is used for financials + milestone history + full custom fields**, with the
-Zapier CLI as a convenient secondary read/trigger surface. Lead-response monitoring should stay
-GoHighLevel-primary.
+**Is Phase 1 feasible?** **Yes, on n8n + the direct REST API.** Morning Brief, Exception Notifications,
+Weekly CEO Memo, and the Production-Readiness Gate are all supportable from AccuLynx structured data via
+**n8n HTTP nodes against the direct AccuLynx REST API v2** (the only source for financials + milestone
+history + full custom fields). Lead-response monitoring should stay GoHighLevel-primary.
 
 **Recommended next step:** Proceed to **Prompt 2 (Status & Field Mapping)** using the field/status inventory
 below. Before building the first n8n workflow, resolve the **Critical** blockers in Deliverable 7 (confirm
@@ -299,7 +304,7 @@ names + IDs per milestone was not enumerated** (no list endpoint on the Zapier s
 
 ### Feasibility by Phase-1 loop
 - **Morning Owner Intelligence Brief** — ✅ feasible (new/open leads, age, rep, appointments, jobs-by-status,
-  completed, stalled, money-at-stake, last activity) via hybrid Zapier + direct API. *Gaps:* production
+  completed, stalled, money-at-stake, last activity) via n8n → direct REST API. *Gaps:* production
   schedule, missing-documents → other systems.
 - **Exception-Only Notifications** — ✅ mostly feasible: lead unassigned (no rep), no appointment/disposition,
   job stalled in status (SLA), completed-not-invoiced, past-due payment (balanceDue aged), required-field-blank.
@@ -321,15 +326,19 @@ names + IDs per milestone was not enumerated** (no list endpoint on the Zapier s
 
 ## Deliverable 6 — Integration Recommendations
 
-| Method | Available | Real-Time/Batch | Auth | Advantages | Limitations | Recommended Use |
+> **All automations run on n8n. Zapier is excluded from the go-forward architecture** (owner-directed) and is
+> omitted from the table below — it appears in this report only as the read-only discovery lens used this session.
+
+| Method (all via n8n) | Available | Real-Time/Batch | Auth | Advantages | Limitations | Recommended Use |
 |---|---|---|---|---|---|---|
-| Zapier AccuLynx actions | ✅ live | Batch (poll) | Zapier OAuth | Zero-code, safe reads, already wired | No financials/history/full-CF; no modified-date list filter | Secondary reads + quick triggers |
-| Direct REST `/jobs` (ModifiedDate) | ✅ (repo) | Batch (incremental) | Bearer key | Full data, `dateFilterType=ModifiedDate` incremental, `count` | pageSize≤25; `pageStartIndex` only | **Primary sync** |
-| Direct REST sub-resources (financials, milestone-history, custom-fields, representatives) | ✅ (repo) | Batch (per-job) | Bearer key | The money & cycle-time data | Per-job N calls; rate-limited | Enrich money-stage jobs |
-| Webhooks `/subscriptions` (25+ topics) | ✅ (repo, unverified live) | **Real-time** | Bearer key | Event-driven exceptions, low load | Needs public n8n endpoint; create = write | Exception notifications, milestone/financial change |
-| n8n scheduled polling | ✅ | Batch | Header-auth cred `Acculynx API` | Simple, robust | Latency = poll interval | Morning brief, weekly memo |
+| n8n HTTP → `GET /jobs` (ModifiedDate) | ✅ (repo) | Batch (incremental) | `Acculynx API` header-auth cred (Bearer) | Full data, `dateFilterType=ModifiedDate` incremental, `count` | pageSize≤25; `pageStartIndex` only | **Primary sync** |
+| n8n HTTP → job sub-resources (financials, milestone-history, custom-fields, representatives) | ✅ (repo) | Batch (per-job) | same cred | The money & cycle-time data | Per-job N calls; rate-limited | Enrich money-stage jobs |
+| n8n webhook ← AccuLynx `/subscriptions` (25+ topics) | ✅ (repo, unverified live) | **Real-time** | same cred | Event-driven exceptions, low load | Needs public n8n webhook URL; creating a subscription = write | Exception notifications, milestone/financial change |
+| n8n Schedule trigger + HTTP poll | ✅ | Batch | same cred | Simple, robust | Latency = poll interval | Morning brief, weekly memo |
 
 **Recommendations:**
+- **Platform:** **n8n only.** All reads (and Phase-2 writes) go through n8n HTTP Request nodes against the
+  direct AccuLynx REST API v2, using the `Acculynx API` header-auth credential. No Zapier dependency.
 - **Strategy:** **Webhooks for exceptions + nightly incremental poll for the full picture.** Use
   `dateFilterType=ModifiedDate` with a 1-day overlap window and **dedupe by job `id`** (repo quirk #4).
 - **Sync frequency:** hourly/near-real-time via webhooks for milestone & financial changes; a
