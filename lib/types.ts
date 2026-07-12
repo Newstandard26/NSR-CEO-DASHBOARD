@@ -18,9 +18,10 @@ export type LeadRow = {
   esc?: boolean;
 };
 
+// Shape matches the Supabase nsr_os_runs rows returned by the data API.
 export type RunInfo = {
-  loop: string; ranAt: string;
-  staleCount: number; emailsSent: number; escalations: number; note: string;
+  loop: string; ran_at: string;
+  stale_count: number; writes: number; escalations: number; messages: number; note: string;
 };
 
 export type Snapshot = {

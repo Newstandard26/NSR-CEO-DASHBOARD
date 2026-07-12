@@ -23,7 +23,7 @@ function RowActions({ row, isLead, onToast }: { row: { id: string; s: string; n:
     }
     if (action === 'esc' && !window.confirm(`Flag ${row.n} for owner review?`)) return;
     if (action === 'done' && !window.confirm(`Mark current action on ${row.n} done? A fresh stage-default plan gets written.`)) return;
-    if (action === 'nudge' && !window.confirm(`Email the assigned rep about ${row.n} right now?`)) return;
+    if (action === 'nudge' && !window.confirm(`Nudge ${row.n}? Writes CALL TODAY + posts an @mention message to the rep in AccuLynx.`)) return;
     setState('busy');
     try {
       const r = await fetch('/api/action', {
@@ -48,7 +48,7 @@ function RowActions({ row, isLead, onToast }: { row: { id: string; s: string; n:
       <button disabled={busy} title="Snooze next-action +7 days" onClick={() => fire('snooze7')}>+7d</button>
       <button disabled={busy} title="Reassign owner" onClick={() => fire('own')}>👤</button>
       <button disabled={busy} title="Flag for owner review" onClick={() => fire('esc')}>⚡</button>
-      {isLead && <button disabled={busy} title="Email the assigned rep now" onClick={() => fire('nudge')}>📣</button>}
+      {isLead && <button disabled={busy} title="Write CALL TODAY + @mention the rep in AccuLynx" onClick={() => fire('nudge')}>📣</button>}
     </span>
   );
 }
@@ -83,7 +83,7 @@ function LoopCard({ title, desc, target, run, onToast, refresh }: {
         {desc}
         <br />
         {run
-          ? <>last run {timeAgo(run.ranAt)}: {run.staleCount} flagged · {run.emailsSent} emails · {run.escalations} escalations</>
+          ? <>last run {timeAgo(run.ran_at)}: {run.stale_count} flagged · {run.writes} updated · {run.messages || 0} reps tagged · {run.escalations} escalations</>
           : <>no runs recorded yet</>}
       </div>
       <div className="row">
@@ -207,11 +207,11 @@ export default function Dashboard({ initial }: { initial: Snapshot }) {
 
       <div className="loops">
         <LoopCard title="Lead Chaser" target="leads" run={lastRun('leads')} onToast={say} refresh={refetch}
-          desc="Leads/prospects untouched >3d: writes next actions, emails each rep their chase list, escalates >7d." />
+          desc="Leads/prospects untouched >3d: writes next actions, @mentions the rep in AccuLynx (sends email), escalates >7d." />
         <LoopCard title="Money Chaser" target="money" run={lastRun('money')} onToast={say} refresh={refetch}
-          desc="Stale holds, unpaid invoices, completed-not-invoiced: flags Stale Money, emails owners, escalates big/old money." />
+          desc="Stale holds, unpaid invoices, completed-not-invoiced: flags Stale Money, @mentions the file owner, escalates big/old money." />
         <LoopCard title="Stale-Job Chaser" target="jobs" run={lastRun('jobs')} onToast={say} refresh={refetch}
-          desc="Any job past its status SLA: writes nudges, emails owners, escalates the worst." />
+          desc="Any job past its status SLA: writes nudges, @mentions the file owner, escalates the worst." />
       </div>
 
       <Queue<LeadRow>
@@ -315,7 +315,7 @@ export default function Dashboard({ initial }: { initial: Snapshot }) {
         </div>
       </div>
 
-      <footer>NSR OS · data pulled from AccuLynx by n8n · actions write straight back to AccuLynx</footer>
+      <footer>NSR OS · data from AccuLynx via Supabase · actions write straight back to AccuLynx</footer>
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
