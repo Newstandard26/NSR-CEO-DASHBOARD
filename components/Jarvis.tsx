@@ -65,13 +65,21 @@ export default function Jarvis({ snap, refetch, onToast }: {
   const [micOk, setMicOk] = useState(true);
   const recRef = useRef<any>(null);
   const snapRef = useRef(snap);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const historyRef = useRef<{ role: string; content: string }[]>([]);
   const pendingRef = useRef<{ action: string; jobId: string; stage: string; name: string; arg?: string } | null>(null);
   snapRef.current = snap;
 
-  const say = useCallback((text: string) => {
-    setLines((l) => [...l.slice(-5), { who: 'jarvis', text }]);
-    historyRef.current = [...historyRef.current.slice(-5), { role: 'assistant', content: text }];
+  // iOS/Safari allow programmatic playback only on an element activated by a user
+  // gesture — prime one shared <audio> with a silent clip on the first tap.
+  const primeAudio = useCallback(() => {
+    if (audioRef.current) return;
+    const a = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=');
+    a.play().catch(() => { /* priming only */ });
+    audioRef.current = a;
+  }, []);
+
+  const browserTts = useCallback((text: string) => {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) { setMode('idle'); return; }
     try {
       window.speechSynthesis.cancel();
@@ -88,6 +96,33 @@ export default function Jarvis({ snap, refetch, onToast }: {
       window.speechSynthesis.speak(u);
     } catch { setMode('idle'); }
   }, []);
+
+  const elevenTts = useCallback(async (text: string) => {
+    const r = await fetch('/api/speak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!r.ok || !(r.headers.get('content-type') || '').includes('audio')) throw new Error('no audio');
+    const blob = await r.blob();
+    if (blob.size < 400) throw new Error('empty audio');
+    const url = URL.createObjectURL(blob);
+    const a = audioRef.current || new Audio();
+    audioRef.current = a;
+    a.src = url;
+    a.onended = () => { setMode('idle'); URL.revokeObjectURL(url); };
+    a.onerror = () => { setMode('idle'); URL.revokeObjectURL(url); };
+    setMode('speaking');
+    await a.play();
+  }, []);
+
+  const say = useCallback((text: string) => {
+    setLines((l) => [...l.slice(-5), { who: 'jarvis', text }]);
+    historyRef.current = [...historyRef.current.slice(-5), { role: 'assistant', content: text }];
+    (async () => {
+      try { await elevenTts(text); } catch { browserTts(text); }
+    })();
+  }, [elevenTts, browserTts]);
 
   const post = useCallback(async (path: string, body: any) => {
     const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -208,9 +243,10 @@ export default function Jarvis({ snap, refetch, onToast }: {
   const startListening = useCallback(() => {
     const W: any = window;
     const SR = W.SpeechRecognition || W.webkitSpeechRecognition;
+    primeAudio();
     if (!SR) { setMicOk(false); setShowType(true); onToast('Voice input not supported here — use the keyboard.'); return; }
     if (mode === 'listening') { recRef.current?.stop(); return; }
-    try { window.speechSynthesis?.cancel(); } catch { /* no tts */ }
+    try { window.speechSynthesis?.cancel(); audioRef.current?.pause(); } catch { /* no tts */ }
     const rec = new SR();
     recRef.current = rec;
     rec.lang = 'en-US';
@@ -224,10 +260,11 @@ export default function Jarvis({ snap, refetch, onToast }: {
     rec.start();
   }, [mode, handle, onToast]);
 
-  useEffect(() => () => { try { recRef.current?.stop(); window.speechSynthesis?.cancel(); } catch { /* teardown */ } }, []);
+  useEffect(() => () => { try { recRef.current?.stop(); window.speechSynthesis?.cancel(); audioRef.current?.pause(); } catch { /* teardown */ } }, []);
 
   const submitTyped = (e: React.FormEvent) => {
     e.preventDefault();
+    primeAudio();
     const t = typed.trim();
     setTyped('');
     if (t) handle(t);

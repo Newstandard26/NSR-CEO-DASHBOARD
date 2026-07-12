@@ -645,6 +645,23 @@ Deno.serve(async (req: Request) => {
       const res = await askJarvis(q, body.history);
       return json(res);
     }
+    if (api === "speak") {
+      // Text-to-speech via ElevenLabs; key + voice live in config. No key → client
+      // falls back to browser speech.
+      const body = await req.json().catch(() => ({}));
+      const text = String(body.text || "").slice(0, 800).trim();
+      if (!text) return json({ error: "empty" }, 400);
+      const ek = cfg["elevenlabs_key"];
+      const voice = cfg["elevenlabs_voice"] || "onwK4e9ZLuTAKqWW03F9";
+      if (!ek) return json({ fallback: true });
+      const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_64`, {
+        method: "POST",
+        headers: { "xi-api-key": ek, "Content-Type": "application/json" },
+        body: JSON.stringify({ text, model_id: "eleven_flash_v2_5", voice_settings: { stability: 0.5, similarity_boost: 0.75 } }),
+      });
+      if (!r.ok) { await r.body?.cancel(); return json({ fallback: true }); }
+      return new Response(r.body, { headers: { "Content-Type": "audio/mpeg", "Cache-Control": "no-store" } });
+    }
     if (api === "testmsg") {
       // mention-format verification on the synthetic Tommy Test lead
       const ok = await postJobMessage(key, "d411176d-29db-416d-aa06-a1173e0f1185",
