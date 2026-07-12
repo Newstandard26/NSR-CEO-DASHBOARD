@@ -83,8 +83,12 @@ First snapshot KPIs (2026-07-12): pipeline **$2,170,850** · collectible **$786,
   mentioned user natively). The remaining email use case — per the owner, the *only* one — is the
   **daily action-list digest per rep**, which still needs an email sender (n8n Gmail is MCP-gated;
   no SMTP creds). The ready-to-import n8n workflow files (with Gmail) were delivered in chat.
-- The **Vercel app** (`nsr-ceo-dashboard` project, code in this repo) is a parallel frontend:
-  it lights up whenever its 8 env vars get set. Not required — the Supabase dashboard is primary.
+- The **Vercel app** (`nsr-ceo-dashboard` project, code in this repo) is a parallel frontend,
+  deployed via direct file upload with a private `.env.production` (config inlined at build by
+  `next.config.mjs`). **Caveat:** the project is also Git-connected, and any push to this repo
+  triggers a secretless git build that steals the production alias (middleware then 503s). Until
+  the 8 env vars are set in Vercel project settings (the durable fix), every push must be followed
+  by re-running the file-upload deploy so it retakes the alias.
 - The existing n8n stack (Exception Sweep 6:15a, Autopilot 6:30a, Money Digest 6:45a) is
   untouched and complementary. Watch for double next-action writes with Autopilot: both are
   blank-only, so first-writer wins — no conflict, but the "(auto)" texts differ.
