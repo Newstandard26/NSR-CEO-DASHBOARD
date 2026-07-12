@@ -201,11 +201,50 @@ async function putCf(key: string, jobId: string, fields: any[]) {
 }
 const today = () => new Date().toISOString().slice(0, 10);
 
+// AccuLynx job message with @mention — AccuLynx notifies/emails the mentioned user natively.
+async function postJobMessage(key: string, jobId: string, text: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await fetch(BASE + `/jobs/${jobId}/messages`, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text }),
+    });
+    if (r.status === 429) { await r.body?.cancel(); await new Promise((res) => setTimeout(res, 500 * 2 ** attempt)); continue; }
+    const ok = r.ok;
+    await r.body?.cancel();
+    return ok;
+  }
+  return false;
+}
+
+// Anti-spam: one message per (job, loop) per `days`; max 15 per mention target per run.
+type Pending = { jobId: string; mention: string; text: string };
+async function sendMentions(key: string, loop: string, pending: Pending[], days: number): Promise<number> {
+  if (!pending.length) return 0;
+  const since = new Date(Date.now() - days * day).toISOString();
+  const { data } = await sb.from("nsr_os_notified").select("job_id").eq("loop", loop).gte("posted_at", since)
+    .in("job_id", pending.map((p) => p.jobId));
+  const recent = new Set((data || []).map((r: any) => r.job_id));
+  const perRep: Record<string, number> = {};
+  const selected = pending.filter((p) => {
+    if (recent.has(p.jobId)) return false;
+    perRep[p.mention] = (perRep[p.mention] || 0) + 1;
+    return perRep[p.mention] <= 15;
+  });
+  const results = await pool(selected, 4, (p) => postJobMessage(key, p.jobId, `@${p.mention} — ${p.text}`));
+  const sent = selected.filter((_, i) => results[i]);
+  if (sent.length) {
+    await sb.from("nsr_os_notified").upsert(sent.map((p) => ({ job_id: p.jobId, loop, posted_at: new Date().toISOString() })));
+  }
+  return sent.length;
+}
+
 async function loopLeads(key: string) {
   const raw = await axPages(key, "/jobs", { milestones: "lead,prospect", includes: "contact,initialAppointment", sortBy: "ModifiedDate", sortOrder: "Ascending" }, 25, 10);
   const stale = raw.map((j: any) => ({ j, modD: daysAgo(j.modifiedDate || j.createdDate) ?? 0 })).filter((x) => x.modD > 3);
   const { users } = await fetchUsers(key);
   let writes = 0; const byRep: Record<string, number> = {}; const escal: string[] = [];
+  const pending: Pending[] = [];
   await pool(stale, 6, async ({ j, modD }) => {
     const [reps, cf] = await Promise.all([
       ax(key, `/jobs/${j.id}/representatives`, { pageSize: "10" }),
@@ -222,11 +261,19 @@ async function loopLeads(key: string) {
     if (fields.length) { await putCf(key, j.id, fields); writes++; }
     if (rep) byRep[rep.name] = (byRep[rep.name] || 0) + 1;
     if (esc) escal.push((j.jobName || j.id) + (rep ? "" : " (NO REP)"));
+    const ia = j.initialAppointment;
+    const appt = !!(ia && (ia.startDate || ia.start || (typeof ia === "string" && ia.length > 0)));
+    pending.push({
+      jobId: j.id,
+      mention: rep?.name || "Mathew Kennington",
+      text: `NSR OS: this ${j.currentMilestone === "Prospect" ? "prospect" : "lead"} is ${modD} days untouched${appt ? "" : " and has no appointment set"}. Contact the customer today and log it in AccuLynx.`,
+    });
   });
+  const messages = await sendMentions(key, "leads", pending, 3);
   const note = stale.length
     ? "by rep: " + (Object.entries(byRep).map(([n, c]) => `${n}: ${c}`).join(", ") || "none assigned") + (escal.length ? ` | escalated: ${escal.slice(0, 8).join("; ")}` : "")
     : "no stale leads";
-  return { loop: "leads", stale_count: stale.length, writes, escalations: escal.length, note: note.slice(0, 380) };
+  return { loop: "leads", stale_count: stale.length, writes, escalations: escal.length, messages, note: note.slice(0, 380) };
 }
 
 async function loopMoney(key: string) {
@@ -236,6 +283,7 @@ async function loopMoney(key: string) {
   for (const f of defs) if (f.id === FIELD.priority) for (const o of f.options || []) if (o.value === "Stale Money") staleOpt = o.id;
   const { byName } = await fetchUsers(key);
   let flagged = 0, writes = 0; const byOwner: Record<string, number> = {}; const escal: string[] = [];
+  const pending: Pending[] = [];
   await pool(jobs, 6, async (j: any) => {
     const [cm, fin, cf] = await Promise.all([
       ax(key, `/jobs/${j.id}/milestones/current`, { includes: "status" }),
@@ -264,17 +312,29 @@ async function loopMoney(key: string) {
     const owner = (cfv["File Owner"] || "").trim();
     if (owner) byOwner[owner] = (byOwner[owner] || 0) + 1;
     if (esc || !byName[owner.toLowerCase()]) escal.push((j.jobName || j.id) + ` [$${d.toLocaleString("en-US")}]`);
+    const why = reasons.map((r) =>
+      r === "hold" ? `stuck in "${st}" for ${stD} days` :
+      r === "unpaid" ? `$${d.toLocaleString("en-US")} unpaid for ${stD} days` :
+      r === "uninvoiced" ? `completed ${msD} days ago and not invoiced` :
+      "approved with no estimate value entered").join("; ");
+    pending.push({
+      jobId: j.id,
+      mention: byName[owner.toLowerCase()]?.name || "Mathew Kennington",
+      text: `NSR OS: money blocker — ${why}. Clear the blocker or update the plan in AccuLynx.`,
+    });
   });
+  const messages = await sendMentions(key, "money", pending, 7);
   const note = flagged
     ? "by owner: " + (Object.entries(byOwner).map(([n, c]) => `${n}: ${c}`).join(", ") || "unowned") + (escal.length ? ` | escalated: ${escal.slice(0, 6).join("; ")}` : "")
     : "no money blockers";
-  return { loop: "money", stale_count: flagged, writes, escalations: escal.length, note: note.slice(0, 380) };
+  return { loop: "money", stale_count: flagged, writes, escalations: escal.length, messages, note: note.slice(0, 380) };
 }
 
 async function loopJobs(key: string) {
   const jobs = await axPages(key, "/jobs", { milestones: "approved,completed,invoiced", sortBy: "MilestoneDate", sortOrder: "Ascending" });
   const { byName } = await fetchUsers(key);
   let flagged = 0, writes = 0; const byOwner: Record<string, number> = {}; const escal: string[] = [];
+  const pending: Pending[] = [];
   await pool(jobs, 6, async (j: any) => {
     const [cm, cf] = await Promise.all([
       ax(key, `/jobs/${j.id}/milestones/current`, { includes: "status" }),
@@ -298,11 +358,19 @@ async function loopJobs(key: string) {
     const owner = (cfv["File Owner"] || "").trim();
     if (owner) byOwner[owner] = (byOwner[owner] || 0) + 1;
     if (esc || !byName[owner.toLowerCase()]) escal.push(j.jobName || j.id);
+    pending.push({
+      jobId: j.id,
+      mention: byName[owner.toLowerCase()]?.name || "Mathew Kennington",
+      text: overSla
+        ? `NSR OS: status "${st}" is ${stD} days old (SLA ${lim}d). Move the job or update the plan in AccuLynx.`
+        : `NSR OS: no activity on this job for ${modD} days. Touch it or update the plan in AccuLynx.`,
+    });
   });
+  const messages = await sendMentions(key, "jobs", pending, 7);
   const note = flagged
     ? "by owner: " + (Object.entries(byOwner).map(([n, c]) => `${n}: ${c}`).join(", ") || "unowned") + (escal.length ? ` | escalated: ${escal.slice(0, 8).join("; ")}` : "")
     : "no stale jobs";
-  return { loop: "jobs", stale_count: flagged, writes, escalations: escal.length, note: note.slice(0, 380) };
+  return { loop: "jobs", stale_count: flagged, writes, escalations: escal.length, messages, note: note.slice(0, 380) };
 }
 
 // ---------- actions ----------
@@ -331,7 +399,18 @@ async function doAction(key: string, body: any) {
     fields.push({ id: FIELD.review, fieldType: "Boolean", values: ["true"] });
   }
   await putCf(key, jobId, fields);
-  return { ok: true, wrote: fields.length };
+  let messaged = false;
+  if (action === "nudge") {
+    const [reps, u] = await Promise.all([
+      ax(key, `/jobs/${jobId}/representatives`, { pageSize: "10" }),
+      fetchUsers(key),
+    ]);
+    const ri = (reps?.items || []).find((r: any) => r.user?.id);
+    const rep = ri ? u.users[ri.user.id] : null;
+    messaged = await postJobMessage(key, jobId,
+      `@${rep?.name || "Mathew Kennington"} — CALL TODAY: nudged from the NSR OS dashboard. Contact the customer now and log it in AccuLynx.`);
+  }
+  return { ok: true, wrote: fields.length, messaged };
 }
 
 // ---------- dashboard html ----------
@@ -380,16 +459,16 @@ function act(btn,action,id,stg,nm){
  if(action==='own'){arg=prompt('Assign owner for '+nm+':')||'';if(!arg)return}
  if(action==='esc'&&!confirm('Flag '+nm+' for owner review?'))return;
  if(action==='done'&&!confirm('Mark current action on '+nm+' done? A fresh stage-default plan gets written.'))return;
- if(action==='nudge'&&!confirm('Write CALL TODAY + owner-review flag on '+nm+'?'))return;
+ if(action==='nudge'&&!confirm('Nudge '+nm+'? Writes CALL TODAY + posts an @mention message to the rep in AccuLynx.'))return;
  btn.disabled=true;var old=btn.textContent;btn.textContent='\\u2026';
  post('api=action',{action:action,jobId:id,stage:stg,arg:arg}).then(function(j){
-  if(!j.ok)throw 0;btn.textContent='\\u2713';btn.style.borderColor='#2e7d32';toast(action+' \\u2192 '+nm+' saved')
+  if(!j.ok)throw 0;btn.textContent='\\u2713';btn.style.borderColor='#2e7d32';toast(action+' \\u2192 '+nm+' saved'+(j.messaged?' \\u00b7 rep tagged in AccuLynx':''))
  }).catch(function(){btn.disabled=false;btn.textContent=old;toast('Action failed on '+nm)})}
 function actBtns(id,stg,nm,isLead){
  var b=function(a,label,tip){return '<button title="'+tip+'" onclick="act(this,\\''+a+'\\',\\''+id+'\\',\\''+esc(stg)+'\\',\\''+esc(nm).replace(/'/g,'')+'\\')">'+label+'</button>'};
- return '<span class="acts">'+b('done','\\u2713','Done: write next stage-default plan')+b('snooze7','+7d','Snooze next action 7 days')+b('own','\\ud83d\\udc64','Reassign owner')+b('esc','\\u26a1','Flag for owner review')+(isLead?b('nudge','\\ud83d\\udce3','Write CALL TODAY + review flag'):'')+'</span>'}
+ return '<span class="acts">'+b('done','\\u2713','Done: write next stage-default plan')+b('snooze7','+7d','Snooze next action 7 days')+b('own','\\ud83d\\udc64','Reassign owner')+b('esc','\\u26a1','Flag for owner review')+(isLead?b('nudge','\\ud83d\\udce3','Write CALL TODAY + @mention the rep'):'')+'</span>'}
 function runLoop(btn,name,title){btn.disabled=true;toast(title+' started \\u2014 results in ~1 min');
- post('api=loop&name='+name).then(function(j){toast(title+': '+j.stale_count+' flagged, '+j.writes+' records updated, '+j.escalations+' escalations');load()}).catch(function(){toast(title+' failed')}).finally(function(){btn.disabled=false})}
+ post('api=loop&name='+name).then(function(j){toast(title+': '+j.stale_count+' flagged, '+j.writes+' records updated, '+(j.messages||0)+' reps tagged, '+j.escalations+' escalations');load()}).catch(function(){toast(title+' failed')}).finally(function(){btn.disabled=false})}
 function refreshData(btn){btn.disabled=true;toast('Rebuilding snapshot from AccuLynx (~30-60s)\\u2026');
  post('api=refresh').then(function(){toast('Snapshot rebuilt');load()}).catch(function(){toast('Refresh failed')}).finally(function(){btn.disabled=false})}
 function queue(title,why,tone,items,render,show){show=show||8;var h='<section class="q '+tone+'"><h2>'+title+'<span class="count">'+items.length+'</span></h2><p class="why">'+why+'</p>';
@@ -409,11 +488,11 @@ function render(){
   '<div class="kpi '+(k.queuedUnscheduled?'warn':'')+'"><b>'+(k.queuedUnscheduled||0)+'</b><span>queued, not scheduled</span></div>';
  var runs=S.runs||[];var lastRun=function(n){for(var i=0;i<runs.length;i++)if(runs[i].loop===n)return runs[i];return null};
  var loopCard=function(name,title,desc){var r=lastRun(name);
-  return '<div class="loop"><h3>'+title+'</h3><div class="meta">'+desc+'<br>'+(r?('last run '+ago(r.ran_at)+': '+r.stale_count+' flagged \\u00b7 '+r.writes+' updated \\u00b7 '+r.escalations+' escalations'):'no runs recorded yet')+'</div><div style="margin-top:8px"><button class="primary" onclick="runLoop(this,\\''+name+'\\',\\''+title+'\\')">Run now</button></div></div>'};
+  return '<div class="loop"><h3>'+title+'</h3><div class="meta">'+desc+'<br>'+(r?('last run '+ago(r.ran_at)+': '+r.stale_count+' flagged \\u00b7 '+r.writes+' updated \\u00b7 '+(r.messages||0)+' reps tagged \\u00b7 '+r.escalations+' escalations'):'no runs recorded yet')+'</div><div style="margin-top:8px"><button class="primary" onclick="runLoop(this,\\''+name+'\\',\\''+title+'\\')">Run now</button></div></div>'};
  document.getElementById('loops').innerHTML=
-  loopCard('leads','Lead Chaser','Leads/prospects untouched &gt;3d: writes next actions into AccuLynx, flags &gt;7d for owner review.')+
-  loopCard('money','Money Chaser','Stale holds, unpaid invoices, uninvoiced completions: sets Stale Money + owner-review flags.')+
-  loopCard('jobs','Stale-Job Chaser','Jobs past their status SLA: writes nudges, escalates 2\\u00d7-over-SLA.');
+  loopCard('leads','Lead Chaser','Leads/prospects untouched &gt;3d: writes next actions, @mentions the rep in AccuLynx (sends email), flags &gt;7d for owner review.')+
+  loopCard('money','Money Chaser','Stale holds, unpaid invoices, uninvoiced completions: sets Stale Money, @mentions the file owner, flags for review.')+
+  loopCard('jobs','Stale-Job Chaser','Jobs past their status SLA: writes nudges, @mentions the file owner, escalates 2\\u00d7-over-SLA.');
  var q='';
  q+=queue('Stale leads &amp; prospects','Untouched in AccuLynx for 3+ days. Call, book, or kill.','critical',S.staleLeads||[],function(l){
   return '<div class="item"><span class="nm">'+esc(l.n)+'</span><span class="note">'+esc(l.s)+' \\u00b7 '+l.modD+'d untouched \\u00b7 age '+l.age+'d \\u00b7 '+(l.appt?'appt set':'NO appointment')+(l.rep?' \\u00b7 rep: '+esc(l.rep):' \\u00b7 NO REP')+(l.ph?' \\u00b7 '+esc(l.ph):'')+(l.esc?' \\u00b7 ESCALATED':'')+'</span>'+actBtns(l.id,l.s,l.n,true)+'</div>'});
@@ -460,7 +539,7 @@ Deno.serve(async (req: Request) => {
     if (api === "data") {
       const [{ data: snapRow }, { data: runs }] = await Promise.all([
         sb.from("nsr_os_snapshot").select("data,generated_at").eq("id", 1).maybeSingle(),
-        sb.from("nsr_os_runs").select("loop,ran_at,stale_count,writes,escalations,note").order("ran_at", { ascending: false }).limit(30),
+        sb.from("nsr_os_runs").select("loop,ran_at,stale_count,writes,escalations,messages,note").order("ran_at", { ascending: false }).limit(30),
       ]);
       if (!snapRow) return json({ error: "no snapshot yet", runs: runs || [] });
       return json({ ...(snapRow.data as object), runs: runs || [] });
@@ -482,6 +561,12 @@ Deno.serve(async (req: Request) => {
       const body = await req.json().catch(() => ({}));
       const res = await doAction(key, body);
       return json(res, res.ok ? 200 : 400);
+    }
+    if (api === "testmsg") {
+      // mention-format verification on the synthetic Tommy Test lead
+      const ok = await postJobMessage(key, "d411176d-29db-416d-aa06-a1173e0f1185",
+        "@Mathew Kennington — NSR OS mention test: if this shows as a highlighted mention and you got an AccuLynx notification/email, rep tagging is live.");
+      return json({ ok });
     }
     return json({ error: "unknown api" }, 400);
   } catch (e) {

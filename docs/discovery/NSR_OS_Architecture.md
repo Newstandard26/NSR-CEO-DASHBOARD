@@ -1,4 +1,4 @@
-# NSR OS — Deployed Architecture (v1, live 2026-07-12)
+# NSR OS — Deployed Architecture (v1.1, live 2026-07-12)
 
 ## What shipped
 
@@ -15,10 +15,12 @@ Supabase project qpjswujpidkirshwirfw
 │   POST ?t=<token>&api=refresh   → full AccuLynx pull → snapshot (≈17s)
 │   POST ?t=<token>&api=loop&name=leads|money|jobs → run an agentic loop
 │   POST ?t=<token>&api=action    → {action: done|snooze7|own|esc|nudge, jobId, stage, arg}
+│   POST ?t=<token>&api=testmsg   → mention-format test message on the synthetic test lead
 ├─ Tables (RLS on, zero policies → service-role only)
 │   nsr_os_config    — acculynx_key, os_token
 │   nsr_os_snapshot  — single-row jsonb snapshot
-│   nsr_os_runs      — loop run log (feeds the dashboard loop panel)
+│   nsr_os_runs      — loop run log incl. messages count (feeds the dashboard loop panel)
+│   nsr_os_notified  — (job_id, loop, posted_at) anti-spam ledger for @mention messages
 └─ pg_cron + pg_net
     nsr-os-refresh     */30 * * * *   (snapshot every 30 min)
     nsr-os-loop-leads  0 12 * * *     (7:00am CT)
@@ -40,13 +42,30 @@ All writes are **blank-only** — a human's entry is never overwritten. Escalati
 | **Money Chaser** (7:05) | holds >14d · Invoiced unpaid >7d · Completed >7d · Approved $0 >7d | Stale Money priority (option UUID resolved live) + Owner Review (≥$25k over-SLA or >60d) | 19 flagged, 5 written, 5 escalations (incl. the four year-old change-order jobs and the long-standing down-payment hold flagged in the discovery audit) |
 | **Stale-Job Chaser** (7:10) | status-age > Prompt-2 SLA class, or dormant >7d | Next Action nudge + date; 2×-SLA → Owner Review | 30 flagged, 18 written, 23 escalations |
 
+## v1.1 — rep notifications via AccuLynx @mention job messages
+
+Per the owner: tagging the company rep in a job message notifies + emails them **natively in
+AccuLynx** — no external email service needed. Every loop now posts a job message on each flagged
+record, `@`-mentioning the lead's company rep (Lead Chaser) or the File Owner (Money / Stale-Job
+Chasers); records with no resolvable rep/owner mention the owner (Matt) instead. The 📣 nudge
+button posts an immediate `@rep — CALL TODAY …` message on top of its field writes.
+
+Anti-spam guards: `nsr_os_notified` ledger allows one message per (job, loop) per **3 days**
+(leads) / **7 days** (money, jobs), and each run caps at **15 messages per rep**. Run summaries
+carry a `messages` count; dashboard loop cards show "N reps tagged".
+
+v1.1 verified live (2026-07-12): `api=testmsg` posted the mention test on the synthetic test
+lead (200 ok); Lead Chaser run posted **7 rep mentions** (3 reps) with 7 ledger rows written;
+immediate re-run posted **0** — no double-tagging.
+
 ## Dashboard
 
 Dark ops surface. KPI tiles (collectible $, pipeline $, active jobs, open leads, **stale leads**,
 **queued-unscheduled**) · loop control panel (last-run stats + **Run now** buttons + **Refresh
 data**) · queues: Stale Leads ★ (with rep), Money Blockers, Stale Jobs, Production Board
 (queue×calendar, unscheduled first) · full sortable/filterable record table · per-row actions
-**✓ done · +7d · 👤 own · ⚡ escalate · 📣 nudge** (nudge writes CALL-TODAY + review flag).
+**✓ done · +7d · 👤 own · ⚡ escalate · 📣 nudge** (nudge writes CALL-TODAY + review flag and
+posts an immediate @mention message to the rep in AccuLynx).
 
 First snapshot KPIs (2026-07-12): pipeline **$2,170,850** · collectible **$786,023** ·
 75 active jobs · 179 open leads/prospects · 133 stale leads · 19 money blockers · 30 stale jobs ·
@@ -60,10 +79,10 @@ First snapshot KPIs (2026-07-12): pipeline **$2,170,850** · collectible **$786,
 - All three loops executed live; run rows land in `nsr_os_runs` and show on the dashboard
 
 ## Deferred / notes
-- **Rep chase-list emails**: no autonomous email sender is reachable (n8n Gmail is MCP-gated;
-  no SMTP creds). Loops act via AccuLynx writes + escalation flags; per-rep counts are in each
-  run's note and on the dashboard. Wire Gmail via n8n when connector access returns — the
-  ready-to-import n8n workflow files (with Gmail) were delivered in chat.
+- **Per-item rep notification is covered** by the v1.1 @mention job messages (AccuLynx emails the
+  mentioned user natively). The remaining email use case — per the owner, the *only* one — is the
+  **daily action-list digest per rep**, which still needs an email sender (n8n Gmail is MCP-gated;
+  no SMTP creds). The ready-to-import n8n workflow files (with Gmail) were delivered in chat.
 - The **Vercel app** (`nsr-ceo-dashboard` project, code in this repo) is a parallel frontend:
   it lights up whenever its 8 env vars get set. Not required — the Supabase dashboard is primary.
 - The existing n8n stack (Exception Sweep 6:15a, Autopilot 6:30a, Money Digest 6:45a) is
