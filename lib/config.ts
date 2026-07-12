@@ -12,6 +12,7 @@ export const cfg = {
   dataUrl: () => env('NSR_DATA_URL'),
   refreshUrl: () => env('NSR_REFRESH_URL'),
   actionsUrl: () => env('NSR_ACTIONS_URL'),
+  askUrl: () => env('NSR_ASK_URL'),
   loopUrl: (loop: string) => {
     if (loop === 'leads') return env('NSR_LOOP_LEADS_URL');
     if (loop === 'money') return env('NSR_LOOP_MONEY_URL');

@@ -1,4 +1,22 @@
-# NSR OS — Deployed Architecture (v1.1, live 2026-07-12)
+# NSR OS — Deployed Architecture (v2 "JARVIS", live 2026-07-12)
+
+## v2 — Jarvis HUD + voice agent (Vercel app)
+
+The Vercel dashboard is now a Jarvis-style HUD with a voice agent. **No backend function was
+rewritten** — the voice layer drives the existing endpoints.
+
+- **Voice in/out**: browser SpeechRecognition + speechSynthesis (free, on-device, HTTPS-gated).
+  Mic orb docked bottom-center; keyboard fallback input doubles as the e2e test hook.
+- **Tier 1 (no key, instant)**: spoken briefings, KPI Q&A, "run the <lead|money|job> chaser",
+  "refresh the data", and job actions by fuzzy name ("nudge <job>") with verbal confirmation.
+- **Tier 2 (Claude)**: `POST /api/ask` (Next proxy) → edge fn `api=ask`, which loads
+  `anthropic_key` from `nsr_os_config`, sends a compact snapshot digest + the utterance to
+  claude-sonnet-5 with one `command` tool (run_loop | refresh | job_action), and returns
+  `{speech, command?}`; the client speaks the reply and executes the command through the same
+  /api routes the buttons use. No key in config → graceful fallback to Tier 1.
+- Verified headless (playwright-core + system Chromium): briefing includes live KPIs, KPI
+  answers correct, no-key fallback message correct; auth wall intact.
+
 
 ## What shipped
 

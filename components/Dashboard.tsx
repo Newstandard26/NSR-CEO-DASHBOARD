@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useMemo, useState } from 'react';
+import Jarvis from '@/components/Jarvis';
 import type { JobRow, LeadRow, RunInfo, Snapshot } from '@/lib/types';
 
 const fmt = (v: number) => (v ? '$' + Math.round(v).toLocaleString('en-US') : '');
@@ -188,7 +189,8 @@ export default function Dashboard({ initial }: { initial: Snapshot }) {
   return (
     <div className="wrap">
       <header className="top">
-        <h1>NSR OS</h1>
+        <h1>NSR <span className="hud-accent">OS</span></h1>
+        <span className="sysline">J.A.R.V.I.S. INTERFACE</span>
         <span className="stamp">snapshot {timeAgo(snap.generatedAt)}</span>
         <span className="spacer" />
         <button onClick={refreshSnapshot}>↻ Refresh data</button>
@@ -317,6 +319,7 @@ export default function Dashboard({ initial }: { initial: Snapshot }) {
 
       <footer>NSR OS · data from AccuLynx via Supabase · actions write straight back to AccuLynx</footer>
       {toast && <div className="toast">{toast}</div>}
+      <Jarvis snap={snap} refetch={refetch} onToast={say} />
     </div>
   );
 }

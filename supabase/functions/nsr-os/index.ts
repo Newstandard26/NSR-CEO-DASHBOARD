@@ -413,6 +413,82 @@ async function doAction(key: string, body: any) {
   return { ok: true, wrote: fields.length, messaged };
 }
 
+// ---------- voice agent brain (Jarvis) ----------
+// Answers a spoken/typed question against the stored snapshot; may return one command
+// for the CLIENT to execute through the existing /api routes. Add-only — reuses nothing
+// destructively and touches no loop/action logic.
+function snapshotDigest(data: any, runs: any[]): string {
+  if (!data) return "No snapshot available yet — suggest the user refresh the data.";
+  const k = data.kpis || {};
+  const money = (n: number) => "$" + Math.round(n || 0).toLocaleString("en-US");
+  const L = (l: any) => `${l.n} {id:${l.id}, stage:${l.s}} — ${l.modD}d untouched${l.appt ? "" : ", NO appointment"}${l.rep ? ", rep " + l.rep : ", NO REP"}`;
+  const M = (r: any) => `${r.n} {id:${r.id}, stage:${r.s}} — ${money(r.d || r.v)} — ${(r.reasons || []).join("; ")}${r.own ? " — owner " + r.own : " — NO OWNER"}`;
+  const J = (r: any) => `${r.n} {id:${r.id}, stage:${r.s}} — status "${r.st}" ${r.stD}d (SLA ${r.sla}d)${r.own ? " — " + r.own : ""}`;
+  const P = (r: any) => `${r.n} {id:${r.id}, stage:${r.s}} — ${r.st} ${r.stD}d${r.ev ? " — next: " + r.ev.date + " " + r.ev.type : " — NOTHING ON CALENDAR"}`;
+  return [
+    `Snapshot generated ${data.generatedAt}.`,
+    `KPIs: pipeline ${money(k.pipelineValue)}; collectible ${money(k.balanceDue)}; ${k.activeJobs || 0} active jobs; ${k.openLeads || 0} open leads/prospects; ${k.staleLeads || 0} stale leads (>3d untouched); ${k.moneyBlockers || 0} money blockers; ${k.staleJobs || 0} jobs over SLA; ${k.queuedUnscheduled || 0} queued but unscheduled.`,
+    `STALE LEADS (top 10): ${(data.staleLeads || []).slice(0, 10).map(L).join(" | ") || "none"}`,
+    `MONEY BLOCKERS (top 10): ${(data.moneyBlockers || []).slice(0, 10).map(M).join(" | ") || "none"}`,
+    `JOBS OVER SLA (top 10): ${(data.staleJobs || []).slice(0, 10).map(J).join(" | ") || "none"}`,
+    `PRODUCTION BOARD: ${(data.production || []).slice(0, 10).map(P).join(" | ") || "none"}`,
+    `RECENT LOOP RUNS: ${(runs || []).map((r: any) => `${r.loop} ${r.ran_at}: ${r.stale_count} flagged, ${r.writes} updated, ${r.messages || 0} reps tagged, ${r.escalations} escalations`).join(" | ") || "none"}`,
+  ].join("\n");
+}
+
+async function askJarvis(question: string, history: unknown): Promise<any> {
+  const cfg = await config();
+  const akey = cfg["anthropic_key"];
+  if (!akey) return { fallback: true };
+  const [{ data: snapRow }, { data: runs }] = await Promise.all([
+    sb.from("nsr_os_snapshot").select("data").eq("id", 1).maybeSingle(),
+    sb.from("nsr_os_runs").select("loop,ran_at,stale_count,writes,escalations,messages").order("ran_at", { ascending: false }).limit(6),
+  ]);
+  const system = `You are JARVIS, the voice agent of NSR OS — the operating dashboard of New Standard Restoration, a roofing and insurance-restoration contractor. You speak with the owner. Personality: crisp, capable, lightly dry; "sir" at most once per reply. Your replies are SPOKEN ALOUD by a speech synthesizer: 1–3 short sentences, round dollar amounts ("about 786 thousand"), never read IDs, GUIDs, URLs, or timestamps aloud, never use markdown or bullet lists. Answer questions strictly from the LIVE DATA below. When the user asks to run a chaser loop, refresh the data, or act on a specific job (nudge / snooze a week / escalate / mark done / reassign owner), call the "command" tool exactly once AND give a one-sentence spoken confirmation; take the jobId from the {id:...} in the data. If the request is ambiguous about which job, ask one short clarifying question instead of acting. Loops: leads = Lead Chaser (stale leads, tags reps in AccuLynx), money = Money Chaser, jobs = Stale-Job Chaser.\n\nLIVE DATA:\n${snapshotDigest(snapRow?.data, runs || [])}`;
+  const past = Array.isArray(history)
+    ? (history as any[]).slice(-6).filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content.trim())
+    : [];
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "x-api-key": akey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-5",
+      max_tokens: 400,
+      system,
+      tools: [{
+        name: "command",
+        description: "Execute a dashboard command the user requested.",
+        input_schema: {
+          type: "object",
+          properties: {
+            kind: { type: "string", enum: ["run_loop", "refresh", "job_action"] },
+            loop: { type: "string", enum: ["leads", "money", "jobs"], description: "for run_loop" },
+            action: { type: "string", enum: ["done", "snooze7", "own", "esc", "nudge"], description: "for job_action" },
+            jobId: { type: "string", description: "for job_action — the {id:...} from LIVE DATA" },
+            stage: { type: "string", description: "for job_action — the job's stage" },
+            arg: { type: "string", description: "for job_action own — the new owner name" },
+          },
+          required: ["kind"],
+        },
+      }],
+      messages: [...past, { role: "user", content: question }],
+    }),
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    return { error: `brain ${r.status}`, detail: t.slice(0, 200) };
+  }
+  const out = await r.json();
+  let speech = "";
+  let command: unknown = null;
+  for (const b of out.content || []) {
+    if (b.type === "text") speech += b.text;
+    if (b.type === "tool_use" && b.name === "command" && !command) command = b.input;
+  }
+  if (!speech.trim() && command) speech = "On it.";
+  return { speech: speech.trim(), command };
+}
+
 // ---------- dashboard html ----------
 function html(): string {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>NSR OS</title><style>
@@ -561,6 +637,13 @@ Deno.serve(async (req: Request) => {
       const body = await req.json().catch(() => ({}));
       const res = await doAction(key, body);
       return json(res, res.ok ? 200 : 400);
+    }
+    if (api === "ask") {
+      const body = await req.json().catch(() => ({}));
+      const q = String(body.q || "").slice(0, 500).trim();
+      if (!q) return json({ error: "empty question" }, 400);
+      const res = await askJarvis(q, body.history);
+      return json(res);
     }
     if (api === "testmsg") {
       // mention-format verification on the synthetic Tommy Test lead

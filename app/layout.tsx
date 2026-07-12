@@ -2,8 +2,8 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'NSR OS',
-  description: 'New Standard Restoration — operating dashboard',
+  title: 'NSR OS — JARVIS',
+  description: 'New Standard Restoration — voice-driven operating dashboard',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
